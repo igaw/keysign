@@ -89,6 +89,11 @@ def default_config():
     return Path(xdg) / "keysign" / "keysign.toml"
 
 
+def expand(path):
+    """Expand ~ and $VARIABLES in a path from the config."""
+    return Path(os.path.expandvars(path)).expanduser()
+
+
 class Config:
     def __init__(self, path):
         try:
@@ -106,9 +111,27 @@ class Config:
         if not re.fullmatch(r"[0-9A-F]{40}", self.fpr):
             die(f"{path}: keyid must be your full fingerprint")
         self.keyid = self.fpr[-16:]
-        self.pgpkeys = Path(c.get("pgpkeys", "pgpkeys/keys"))
+        pgpkeys = c.get("pgpkeys")
+        self.pgpkeys = expand(pgpkeys) if pgpkeys else None
         self.keyservers = c.get("keyservers", DEFAULT_KEYSERVERS)
-        self.maildir = Path(c.get("maildir", "mail"))
+        self.maildir = expand(c.get("maildir", "mail"))
+
+    def check_pgpkeys(self):
+        if self.pgpkeys and not self.pgpkeys.is_dir():
+            print(
+                f"warning: pgpkeys repo not found: {self.pgpkeys}",
+                file=sys.stderr,
+            )
+
+    def kernel_key(self, keyid):
+        """The key from the kernel.org pgpkeys repo, or None."""
+        if not self.pgpkeys:
+            return None
+        keys = self.pgpkeys / "keys"
+        if not keys.is_dir():
+            keys = self.pgpkeys  # pointing at the keys/ directory itself
+        p = keys / f"{keyid}.asc"
+        return p.read_bytes() if p.exists() else None
 
 
 # ---------------------------------------------------------------- gpg
@@ -307,8 +330,7 @@ def cmd_parse(args, cfg):
 
 
 def fetch_kernel_org(cfg, e):
-    p = cfg.pgpkeys / f"{e.keyid}.asc"
-    return p.read_bytes() if p.exists() else None
+    return cfg.kernel_key(e.keyid)
 
 
 def zbase32(data):
@@ -370,6 +392,7 @@ def keyserver_lookup(ks, query):
 
 
 def cmd_fetch(args, cfg):
+    cfg.check_pgpkeys()
     missing = 0
     imported = read_imported(cfg)
     for e in read_list(args.list):
@@ -425,8 +448,7 @@ def lookup(cfg, query):
         blobs.append(wkd_lookup(q))
         blobs += [keyserver_lookup(ks, q) for ks in cfg.keyservers]
     else:
-        p = cfg.pgpkeys / f"{hexq[-16:]}.asc"
-        blobs.append(p.read_bytes() if p.exists() else None)
+        blobs.append(cfg.kernel_key(hexq[-16:]))
         search = "0x" + (hexq if "_" not in hexq else hexq[-16:])
         blobs += [keyserver_lookup(ks, search) for ks in cfg.keyservers]
     pattern = re.compile(hexq.replace("_", "[0-9A-F]") + "$")
@@ -452,6 +474,7 @@ def lookup(cfg, query):
 
 
 def cmd_add(args, cfg):
+    cfg.check_pgpkeys()
     path = Path(args.list)
     if path.exists():
         known = {e.keyid for e in read_list(path)}

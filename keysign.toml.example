@@ -10,6 +10,10 @@ keyid = "0123456789ABCDEF0123456789ABCDEF01234567"   # your full fingerprint
 sendmail = ["msmtp", "-a", "default", "-f", "alice@example.org", "--"]
 # sendmail = ["/usr/sbin/sendmail", "-f", "alice@example.org", "--"]
 
-pgpkeys    = "pgpkeys/keys"      # clone of the kernel.org pgpkeys repo (optional)
+# Local clone of the kernel.org pgpkeys repo, used as a key source. Optional;
+# leave it out to skip it. Get it with
+#   git clone https://git.kernel.org/pub/scm/docs/kernel/pgpkeys.git
+pgpkeys    = "~/src/pgpkeys"
+
 keyservers = ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"]
-maildir    = "mail"              # mail/outbox, mail/sent, mail/imported
+maildir    = "mail"   # mail/outbox, mail/sent, mail/imported

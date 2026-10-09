@@ -341,6 +341,56 @@ class TestConfigLookup(unittest.TestCase):
         self.assertRegex(out.getvalue(), r"^keysign \d+\.\d+")
 
 
+class TestPgpkeysSetting(KeysignTestCase):
+    def config_with(self, pgpkeys):
+        text = self.config.read_text()
+        text = "\n".join(
+            line
+            for line in text.splitlines()
+            if not line.startswith("pgpkeys")
+        )
+        if pgpkeys is not None:
+            text += f'\npgpkeys = "{pgpkeys}"\n'
+        self.config.write_text(text)
+
+    def test_repo_root_with_tilde(self):
+        repo = self.dir / "home" / "src" / "pgpkeys"
+        (repo / "keys").mkdir(parents=True)
+        (repo / "keys" / f"{self.alice[-16:]}.asc").write_bytes(
+            self.export(self.alice)
+        )
+        self.config_with("~/src/pgpkeys")
+        lst = self.write_list(self.entry(self.alice, "Alice"))
+        with mock.patch.dict(os.environ, {"HOME": str(self.dir / "home")}):
+            out, _ = self.run_cli("fetch", str(lst))
+        self.assertIn("(kernel.org)", out)
+
+    def test_keys_directory_still_works(self):
+        # The fixture points pgpkeys at the keys/ directory itself.
+        self.publish_kernel_org(self.alice)
+        lst = self.write_list(self.entry(self.alice, "Alice"))
+        out, _ = self.run_cli("fetch", str(lst))
+        self.assertIn("(kernel.org)", out)
+
+    def test_unset_skips_kernel_org(self):
+        self.publish_kernel_org(self.alice)
+        self.config_with(None)
+        lst = self.write_list(self.entry(self.alice, "Alice"))
+        out, _ = self.run_cli("fetch", str(lst))
+        self.assertIn("MISSING", out)
+
+    def test_missing_repo_warns(self):
+        self.config_with(self.dir / "nope")
+        lst = self.write_list(self.entry(self.alice, "Alice"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = keysign.Config(self.config)
+            cfg.check_pgpkeys()
+        self.assertIn("pgpkeys repo not found", err.getvalue())
+        out, _ = self.run_cli("fetch", str(lst))
+        self.assertIn("MISSING", out)
+
+
 class TestParse(KeysignTestCase):
     def test_parse(self):
         bob_masked = grouped(self.bob)

@@ -7,7 +7,8 @@ replacement for [caff](https://salsa.debian.org/debian/pgp-tools).
 Requirements: Python 3.11+, GnuPG 2.2+, and an MTA (msmtp, or any `sendmail`
 compatible program). Optionally a clone of the
 [kernel.org pgpkeys](https://git.kernel.org/pub/scm/docs/kernel/pgpkeys.git)
-repo in `pgpkeys/`. No Python packages beyond the standard library.
+repo, set with `pgpkeys` in the config. No Python packages beyond the standard
+library.
 
 ## Install
 
@@ -34,15 +35,20 @@ keyid = "0123456789ABCDEF0123456789ABCDEF01234567"   # full fingerprint
 # The message is piped to stdin and the recipient is appended as the last argument.
 sendmail = ["msmtp", "-a", "default", "-f", "alice@example.org", "--"]
 
-pgpkeys    = "pgpkeys/keys"
+pgpkeys    = "~/src/pgpkeys"     # kernel.org pgpkeys clone, optional
 keyservers = ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"]
 maildir    = "mail"
 ```
 
 keysign reads the file given with `-c FILE`, else `./keysign.toml`, else
 `$XDG_CONFIG_HOME/keysign/keysign.toml` (`~/.config/keysign/keysign.toml`).
-A `keysign.toml` in a party directory overrides the global one. Relative paths
-in the config (`pgpkeys`, `maildir`) are relative to the current directory.
+A `keysign.toml` in a party directory overrides the global one.
+
+`pgpkeys` points to a clone of the kernel.org pgpkeys repo (keysign reads
+`<pgpkeys>/keys/<keyid>.asc`); without it that key source is skipped, and
+`fetch`/`add` warn if the directory doesn't exist. Keep it current with
+`git -C ~/src/pgpkeys pull`. Paths in the config may use `~` and
+`$VARIABLES`; relative paths are relative to the current directory.
 
 keysign uses the keyring in `$GNUPGHOME` (default `~/.gnupg`), so point it at
 the keyring that holds your secret key.
@@ -109,7 +115,7 @@ lookup can return keys of strangers; `add` warns when several keys match.
 Makes sure every listed key is in the keyring. Sources are tried in this order:
 
 1. the local keyring
-2. `pgpkeys/keys/<keyid>.asc` (kernel.org)
+2. the kernel.org pgpkeys repo (`pgpkeys` setting)
 3. WKD for the email address on the list
 4. the configured keyservers
 
