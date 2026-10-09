@@ -37,25 +37,25 @@ the keyring that holds your secret key.
 ## Workflow
 
 ```sh
-./keysign.py parse   party.txt -o party.keys
-$EDITOR party.keys                  # review
-./keysign.py fetch   party.keys
-./keysign.py sign    party.keys     # -n for a dry run
-./keysign.py prepare party.keys
-./keysign.py send                       # -n for a dry run
-./keysign.py clean   party.keys     # -n for a dry run
-./keysign.py status  party.keys     # -v for every UID
+./keysign parse   party.txt -o party.keys
+$EDITOR party.keys                # review
+./keysign fetch   party.keys
+./keysign sign    party.keys      # -n for a dry run
+./keysign prepare party.keys
+./keysign send                    # -n for a dry run
+./keysign clean   party.keys      # -n for a dry run
+./keysign status  party.keys      # -v for every UID
 ```
 
 For keys from paper slips, start with `add` instead of `parse`:
 
 ```sh
-./keysign.py add slips.keys alice@example.org 'ABCD 1234 ... 9876' 0x1234567890ABCDEF
-$EDITOR slips.keys                      # compare with the slips, mark '-' -> 'x'
-./keysign.py fetch slips.keys           # then continue as above
+./keysign add slips.keys alice@example.org 'ABCD 1234 ... 9876' 0x1234567890ABCDEF
+$EDITOR slips.keys        # compare with the slips, mark '-' -> 'x'
+./keysign fetch slips.keys  # then continue as above
 ```
 
-`./keysign.py all LIST` runs fetch, sign and prepare in one go. All steps can
+`./keysign all LIST` runs fetch, sign and prepare in one go. All steps can
 be re-run safely: they skip what is already done.
 
 ### parse
@@ -160,7 +160,7 @@ not touched.
 
 | Path                         | Purpose                                       |
 |------------------------------|-----------------------------------------------|
-| `keysign.py`                 | the tool                                      |
+| `keysign`                    | the tool                                      |
 | `keysign.toml.example`       | example settings, copy to `keysign.toml`      |
 | `tests/test_keysign.py`      | test suite                                    |
 | `*.keys`                     | key lists (yours, not tracked by git)         |

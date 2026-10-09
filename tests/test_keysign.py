@@ -1,4 +1,4 @@
-"""Tests for keysign.py.
+"""Tests for keysign.
 
 Run from the repository root with
 
@@ -10,6 +10,8 @@ directory, a stubbed HTTP layer and a fake sendmail.
 
 import contextlib
 import email
+import importlib.machinery
+import importlib.util
 import io
 import os
 import shutil
@@ -21,8 +23,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import keysign  # noqa: E402
+
+
+def load_keysign():
+    """Import the keysign script, which has no .py extension."""
+    path = Path(__file__).resolve().parent.parent / "keysign"
+    loader = importlib.machinery.SourceFileLoader("keysign", str(path))
+    spec = importlib.util.spec_from_loader("keysign", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+keysign = load_keysign()
 
 PARTICIPANTS = """\
      K E Y S I G N I N G   T E S T

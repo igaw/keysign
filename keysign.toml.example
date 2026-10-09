@@ -1,4 +1,4 @@
-# keysign.py settings; copy to keysign.toml and adjust.
+# keysign settings; copy to keysign.toml and adjust.
 
 name  = "Alice Example"
 email = "alice@example.org"

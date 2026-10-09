@@ -3,17 +3,17 @@
 
 Workflow:
 
-  keysign.py parse   party.txt -o party.keys  # from a gpgparticipants list
-  keysign.py add     party.keys foo@example.org 0x1234...  # or key by key
+  keysign parse   party.txt -o party.keys  # from a gpgparticipants list
+  keysign add     party.keys foo@example.org 0x1234...  # or key by key
   (review party.keys; mark verified keys 'x', drop lines you don't want)
-  keysign.py fetch   party.keys   # local keyring, kernel.org, WKD, keyservers
-  keysign.py sign    party.keys   # certify all UIDs, no prompts
-  keysign.py prepare party.keys   # one encrypted mail per UID -> mail/outbox
-  keysign.py send                 # send mail/outbox/*, move to mail/sent
-  keysign.py clean   party.keys   # delete the fetched keys again
-  keysign.py status  party.keys   # what has been signed and sent
+  keysign fetch   party.keys   # local keyring, kernel.org, WKD, keyservers
+  keysign sign    party.keys   # certify all UIDs, no prompts
+  keysign prepare party.keys   # one encrypted mail per UID -> mail/outbox
+  keysign send                 # send mail/outbox/*, move to mail/sent
+  keysign clean   party.keys   # delete the fetched keys again
+  keysign status  party.keys   # what has been signed and sent
 
-'keysign.py all LIST' runs fetch, sign and prepare in one go.
+'keysign all LIST' runs fetch, sign and prepare in one go.
 
 Key list format (one key per line, '#' starts a comment):
 
