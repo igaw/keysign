@@ -148,14 +148,15 @@ The signed count comes from your keyring, so a key deleted by `clean` shows
 ## Development
 
 ```sh
-python3 -m unittest discover -s tests -v   # tests
-ruff check .                               # lint
-ruff format .                              # format
-mypy                                       # type check
+make check       # lint, format-check, typecheck and test
+make test        # unit tests only
+make format      # reformat the code
+make install     # copy keysign to ~/.local/bin (PREFIX=/usr/local, DESTDIR=...)
+make help        # all targets
 ```
 
 ruff and mypy are configured in `pyproject.toml`; install them with
-`pip install ruff mypy`. CI runs the same checks.
+`pip install ruff mypy`. CI runs the same make targets.
 
 ### Tests
 
@@ -175,6 +176,7 @@ request.
 | `keysign.toml.example`       | example settings, copy to `keysign.toml`      |
 | `tests/test_keysign.py`      | test suite                                    |
 | `pyproject.toml`             | project metadata, ruff and mypy settings      |
+| `Makefile`                   | test, lint, format and install targets        |
 | `*.keys`                     | key lists (yours, not tracked by git)         |
 | `mail/outbox/`, `mail/sent/` | prepared and sent mails                       |
 | `mail/imported`              | keys imported by `fetch`, used by `clean`     |
