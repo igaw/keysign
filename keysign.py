@@ -1,0 +1,724 @@
+#!/usr/bin/env python3
+"""keysign - sign the keys from a keysigning party list and mail the signatures.
+
+Workflow:
+
+  keysign.py parse   party.txt -o party.keys  # from a gpgparticipants list
+  keysign.py add     party.keys foo@example.org 0x1234...  # or key by key
+  (review party.keys; mark verified keys 'x', drop lines you don't want)
+  keysign.py fetch   party.keys   # local keyring, kernel.org, WKD, keyservers
+  keysign.py sign    party.keys   # certify all UIDs, no prompts
+  keysign.py prepare party.keys   # one encrypted mail per UID -> mail/outbox
+  keysign.py send                 # send mail/outbox/*, move to mail/sent
+  keysign.py clean   party.keys   # delete the fetched keys again
+  keysign.py status  party.keys   # what has been signed and sent
+
+'keysign.py all LIST' runs fetch, sign and prepare in one go.
+
+Key list format (one key per line, '#' starts a comment):
+
+  <status> <long keyid> <fingerprint> <name <email>>
+
+status 'x' means fingerprint and ID were verified at the event; only those keys
+are signed. '-' entries are fetched only. A '_' in the fingerprint marks a
+nibble that was masked on the printed list.
+
+Settings are read from keysign.toml (see --config).
+"""
+
+import argparse
+import email.encoders
+import email.utils
+import hashlib
+import re
+import subprocess
+import sys
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+
+DEFAULT_KEYSERVERS = ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"]
+
+MAIL_BODY = """\
+Hi,
+
+please find attached the user id
+
+    {uid}
+
+of your key {fpr} signed by me.
+
+If you have multiple user ids, I sent the signature for each user id
+separately to that user id's associated email address. You can import
+the signatures by running each through `gpg --import`.
+
+Note that I did not upload your key to any keyservers. If you want this
+new signature to be available to others, please upload it yourself.
+With GnuPG this can be done using
+
+    gpg --keyserver hkps://keyserver.ubuntu.com --send-key {fpr}
+
+Regards,
+{name}
+"""
+
+
+def die(msg):
+    sys.exit(f"keysign: {msg}")
+
+
+# ---------------------------------------------------------------- config
+
+class Config:
+    def __init__(self, path):
+        try:
+            with open(path, "rb") as f:
+                c = tomllib.load(f)
+        except FileNotFoundError:
+            die(f"config not found: {path}")
+        try:
+            self.name = c["name"]
+            self.email = c["email"]
+            self.fpr = c["keyid"].replace(" ", "").upper()
+            self.sendmail = c["sendmail"]
+        except KeyError as e:
+            die(f"{path}: missing setting {e}")
+        if not re.fullmatch(r"[0-9A-F]{40}", self.fpr):
+            die(f"{path}: keyid must be your full fingerprint")
+        self.keyid = self.fpr[-16:]
+        self.pgpkeys = Path(c.get("pgpkeys", "pgpkeys/keys"))
+        self.keyservers = c.get("keyservers", DEFAULT_KEYSERVERS)
+        self.maildir = Path(c.get("maildir", "mail"))
+
+
+# ---------------------------------------------------------------- gpg
+
+def gpg(*args, input=None, check=True):
+    r = subprocess.run(["gpg", "--batch", *args], input=input,
+                       capture_output=True)
+    if check and r.returncode:
+        die(f"gpg {' '.join(args)} failed:\n{r.stderr.decode(errors='replace')}")
+    return r
+
+
+def unescape(s):
+    """Undo the \\xNN escaping of gpg --with-colons output."""
+    raw = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m[1], 16)]),
+                 s.encode("utf-8", "surrogateescape"))
+    return raw.decode("utf-8", "replace")
+
+
+def colons(r):
+    for line in r.stdout.decode("utf-8", "surrogateescape").splitlines():
+        yield line.split(":")
+
+
+def keys_in(data):
+    """Primary fingerprint, validity and UIDs of each key in a key blob."""
+    r = gpg("--with-colons", "--show-keys", input=data, check=False)
+    keys, cur = [], None
+    for f in colons(r):
+        if f[0] == "pub":
+            cur = {"fpr": None, "validity": f[1], "uids": []}
+            keys.append(cur)
+        elif f[0] == "fpr" and cur and cur["fpr"] is None:
+            cur["fpr"] = f[9]
+        elif f[0] == "uid" and cur and f[1] not in ("r", "e"):
+            cur["uids"].append(unescape(f[9]))
+    return keys
+
+
+def fprs_in(data):
+    """Primary key fingerprints contained in a key blob."""
+    return [k["fpr"] for k in keys_in(data)]
+
+
+def local_fpr(entry):
+    """Fingerprint of the local key matching the entry, or None."""
+    r = gpg("--with-colons", "--list-keys", "0x" + entry.keyid, check=False)
+    if r.returncode:
+        return None
+    want = False
+    for f in colons(r):
+        if f[0] == "pub":
+            want = True
+        elif f[0] == "fpr" and want:
+            want = False
+            if entry.matches(f[9]):
+                return f[9]
+    return None
+
+
+def key_info(fpr, own_keyid):
+    """Parse the key and note which UIDs carry our certification."""
+    r = gpg("--with-colons", "--fixed-list-mode", "--list-sigs", fpr,
+            check=False)
+    if r.returncode:
+        return None
+    info, cur = None, None
+    for f in colons(r):
+        t = f[0]
+        if t == "pub":
+            info = {"validity": f[1], "caps": f[11], "uids": []}
+        elif t == "uid":
+            cur = {"uid": unescape(f[9]), "validity": f[1], "signed": False}
+            info["uids"].append(cur)
+        elif t in ("uat", "sub"):
+            cur = None
+        elif cur and f[4].upper() == own_keyid:
+            if t == "sig" and f[10][:1] == "1":
+                cur["signed"] = True
+            elif t == "rev":
+                cur["signed"] = False
+    return info
+
+
+def usable(u):
+    return u["validity"] not in ("r", "e")
+
+
+def imported_file(cfg):
+    return cfg.maildir / "imported"
+
+
+def read_imported(cfg):
+    try:
+        return set(imported_file(cfg).read_text().split())
+    except FileNotFoundError:
+        return set()
+
+
+def write_imported(cfg, fprs):
+    cfg.maildir.mkdir(parents=True, exist_ok=True)
+    imported_file(cfg).write_text("".join(f"{f}\n" for f in sorted(fprs)))
+
+
+# ---------------------------------------------------------------- key list
+
+class Entry:
+    def __init__(self, status, fpr, uid):
+        self.status, self.fpr, self.uid = status, fpr, uid
+        self.keyid = fpr[-16:]
+
+    @property
+    def complete(self):
+        return "_" not in self.fpr
+
+    def matches(self, fpr):
+        return re.fullmatch(self.fpr.replace("_", "[0-9A-F]"), fpr) is not None
+
+    def __str__(self):
+        return f"{self.keyid}  {self.uid}"
+
+
+def read_list(path):
+    entries = []
+    for n, line in enumerate(Path(path).read_text().splitlines(), 1):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 3 or parts[0] not in ("x", "-"):
+            die(f"{path}:{n}: cannot parse line")
+        status, keyid, fpr = parts[0], parts[1].upper(), parts[2].upper()
+        if not re.fullmatch(r"[0-9A-F_]{40}", fpr) or fpr[-16:] != keyid:
+            die(f"{path}:{n}: bad fingerprint or keyid")
+        entries.append(Entry(status, fpr, parts[3] if len(parts) > 3 else ""))
+    return entries
+
+
+def verified(entries):
+    for e in entries:
+        if e.status != "x":
+            continue
+        if not e.complete:
+            print(f"SKIP     {e}  (marked verified but fingerprint incomplete)")
+            continue
+        yield e
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_parse(args, cfg):
+    """Extract the participants from a gpgparticipants style list."""
+    text = Path(args.input).read_text()
+    out = [
+        f"# keysign key list, generated from {Path(args.input).name}",
+        "# x = fingerprint and ID verified (gets signed), - = fetch only",
+        "# '_' in a fingerprint marks a nibble masked on the printed list",
+        "#",
+    ]
+    # Entries are separated by lines of underscores.
+    for block in re.split(r"^_{20,}\s*$", text, flags=re.M):
+        head = re.search(r"^\d{3}\s+\[(.)\][^\[]*\[(.)\]", block, re.M)
+        if not head:
+            continue
+        status = "x" if head[1] in "xX" and head[2] in "xX" else "-"
+        fpr = None
+        for line in block.splitlines():
+            cand = re.sub(r"\s", "", line).upper()
+            if re.fullmatch(r"[0-9A-F_]{40}", cand) and line.startswith(" "):
+                fpr = cand
+                break
+        uids = re.findall(r"^uid\s+(.+?)\s*$", block, re.M)
+        if not fpr or not uids:
+            print(f"warning: cannot parse entry:\n{block.strip()}",
+                  file=sys.stderr)
+            continue
+        out.append(f"{status}  {fpr[-16:]}  {fpr}  {uids[0]}")
+    Path(args.output).write_text("\n".join(out) + "\n")
+    print(f"wrote {len(out) - 4} keys to {args.output}")
+
+
+def fetch_kernel_org(cfg, e):
+    p = cfg.pgpkeys / f"{e.keyid}.asc"
+    return p.read_bytes() if p.exists() else None
+
+
+def zbase32(data):
+    alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
+    bits = "".join(f"{b:08b}" for b in data)
+    return "".join(alphabet[int(bits[i:i + 5].ljust(5, "0"), 2)]
+                   for i in range(0, len(bits), 5))
+
+
+def http_get(url, label):
+    req = urllib.request.Request(url, headers={"User-Agent": "keysign"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read()
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            print(f"         {label}: {err}")
+    except OSError:
+        pass  # unreachable hosts are normal for WKD
+    return None
+
+
+def fetch_wkd(e):
+    """Web Key Directory lookup for the email address of the list entry."""
+    _, addr = email.utils.parseaddr(e.uid)
+    return wkd_lookup(addr)
+
+
+def wkd_lookup(addr):
+    if "@" not in addr:
+        return None
+    local, domain = addr.rsplit("@", 1)
+    domain = domain.lower().encode("idna").decode("ascii")
+    h = zbase32(hashlib.sha1(local.lower().encode()).digest())
+    q = urllib.parse.urlencode({"l": local})
+    for url in (f"https://openpgpkey.{domain}/.well-known/openpgpkey/"
+                f"{domain}/hu/{h}?{q}",
+                f"https://{domain}/.well-known/openpgpkey/hu/{h}?{q}"):
+        data = http_get(url, "wkd")
+        if data:
+            return data
+    return None
+
+
+def fetch_keyserver(ks, e):
+    return keyserver_lookup(ks, "0x" + (e.fpr if e.complete else e.keyid))
+
+
+def keyserver_lookup(ks, query):
+    base = re.sub(r"^hkps://", "https://", ks).rstrip("/")
+    url = f"{base}/pks/lookup?" + urllib.parse.urlencode(
+        {"op": "get", "options": "mr", "search": query})
+    return http_get(url, ks)
+
+
+def cmd_fetch(args, cfg):
+    missing = 0
+    imported = read_imported(cfg)
+    for e in read_list(args.list):
+        had = local_fpr(e)
+        if had and not args.refresh:
+            print(f"have     {e}")
+            continue
+        sources = [("kernel.org", lambda e=e: fetch_kernel_org(cfg, e))]
+        sources.append(("wkd", lambda e=e: fetch_wkd(e)))
+        sources += [(ks, lambda ks=ks, e=e: fetch_keyserver(ks, e))
+                    for ks in cfg.keyservers]
+        for src, get in sources:
+            data = get()
+            if not data:
+                continue
+            found = [f for f in fprs_in(data) if e.matches(f)]
+            if len(found) != 1:
+                print(f"MISMATCH {e}  ({src} returned {fprs_in(data)})")
+                continue
+            gpg("--import", input=data)
+            print(f"import   {e}  ({src})")
+            if not had:
+                # Remember keys we brought in so 'clean' can remove them.
+                imported.add(found[0])
+                write_imported(cfg, imported)
+            break
+        else:
+            if local_fpr(e):
+                print(f"have     {e}  (refresh found nothing new)")
+            else:
+                print(f"MISSING  {e}")
+                missing += 1
+    if missing:
+        print(f"\n{missing} key(s) not found")
+
+
+def lookup(cfg, query):
+    """All keys matching an email address, fingerprint or key ID.
+
+    Returns {fpr: key} from keys_in(); for an email address only keys
+    carrying that address in a valid UID are kept.
+    """
+    q = query.strip()
+    hexq = re.sub(r"\s", "", q).upper().removeprefix("0X")
+    is_mail = "@" in q
+    if not is_mail and not re.fullmatch(r"[0-9A-F_]{16}|[0-9A-F_]{40}", hexq):
+        die(f"not an email address, fingerprint or key ID: {query}")
+    blobs = [gpg("--export", q if is_mail else hexq[-16:], check=False).stdout]
+    if is_mail:
+        blobs.append(wkd_lookup(q))
+        blobs += [keyserver_lookup(ks, q) for ks in cfg.keyservers]
+    else:
+        p = cfg.pgpkeys / f"{hexq[-16:]}.asc"
+        blobs.append(p.read_bytes() if p.exists() else None)
+        search = "0x" + (hexq if "_" not in hexq else hexq[-16:])
+        blobs += [keyserver_lookup(ks, search) for ks in cfg.keyservers]
+    pattern = re.compile(hexq.replace("_", "[0-9A-F]") + "$")
+    mail = addr_of(q)[1].lower() if is_mail else None
+    found = {}
+    for data in filter(None, blobs):
+        for k in keys_in(data):
+            if is_mail:
+                # Put the UID with the queried address first.
+                k["uids"].sort(key=lambda u: addr_of(u)[1].lower() != mail)
+                if not k["uids"] or addr_of(k["uids"][0])[1].lower() != mail:
+                    continue
+            elif not pattern.search(k["fpr"]):
+                continue
+            # Prefer a copy that is neither expired nor revoked.
+            old = found.get(k["fpr"])
+            if not old or (old["validity"] in ("e", "r")
+                           and k["validity"] not in ("e", "r")):
+                found[k["fpr"]] = k
+    return found
+
+
+def cmd_add(args, cfg):
+    path = Path(args.list)
+    if path.exists():
+        known = {e.keyid for e in read_list(path)}
+        lines = []
+    else:
+        known = set()
+        lines = [
+            "# keysign key list",
+            "# x = fingerprint and ID verified (gets signed), - = fetch only",
+            "#",
+        ]
+    added = unverified = 0
+    for q in args.query:
+        full = re.fullmatch(r"(0X)?[0-9A-F]{40}", re.sub(r"\s", "", q).upper())
+        status = "x" if args.verified and full else "-"
+        if args.verified and not full:
+            print(f"NOTE     {q}: -x needs the full fingerprint, added as '-'")
+        keys = lookup(cfg, q)
+        if not keys:
+            print(f"NOTFOUND {q}")
+            continue
+        if len(keys) > 1:
+            print(f"WARNING  {len(keys)} keys match {q}; keep only the one "
+                  f"on your slip")
+        for fpr, k in keys.items():
+            groups = " ".join(fpr[i:i + 4] for i in range(0, 40, 4))
+            state = {"e": "  [expired]", "r": "  [revoked]"}.get(
+                k["validity"], "")
+            if fpr[-16:] in known:
+                print(f"exists   {fpr[-16:]}  {q}")
+                continue
+            known.add(fpr[-16:])
+            added += 1
+            unverified += status == "-"
+            uid = k["uids"][0] if k["uids"] else ""
+            lines.append(f"{status}  {fpr[-16:]}  {fpr}  {uid}")
+            print(f"add      {groups}{state}")
+            for u in k["uids"]:
+                print(f"         {u}")
+    if lines and any(not l.startswith("#") for l in lines):
+        with path.open("a") as f:
+            f.write("".join(l + "\n" for l in lines))
+    if unverified:
+        print(f"\nCompare the fingerprints with your slips, then change '-' to "
+              f"'x' in {path}")
+
+
+def cmd_sign(args, cfg):
+    for e in verified(read_list(args.list)):
+        fpr = local_fpr(e)
+        if not fpr:
+            print(f"MISSING  {e}  (run fetch)")
+            continue
+        info = key_info(fpr, cfg.keyid)
+        if info["validity"] in ("r", "e", "d"):
+            print(f"SKIP     {e}  (key revoked/expired/disabled)")
+            continue
+        todo = [u for u in info["uids"] if usable(u) and not u["signed"]]
+        if not todo:
+            print(f"signed   {e}")
+            continue
+        if args.dry_run:
+            print(f"would    {e}  ({len(todo)} uid(s))")
+            continue
+        r = gpg("--default-key", cfg.fpr, "--quick-sign-key", fpr,
+                check=False)
+        info = key_info(fpr, cfg.keyid)
+        left = [u["uid"] for u in info["uids"] if usable(u) and not u["signed"]]
+        if left:
+            print(f"FAILED   {e}  unsigned: {left}")
+            print(r.stderr.decode(errors="replace"), file=sys.stderr)
+        else:
+            print(f"sign     {e}  ({len(todo)} uid(s))")
+
+
+def addr_of(uid):
+    name, addr = email.utils.parseaddr(uid)
+    if "@" not in addr:
+        return None, None
+    local, domain = addr.rsplit("@", 1)
+    return name, f"{local}@{domain.encode('idna').decode('ascii')}"
+
+
+def mail_name(keyid, uid):
+    _, rcpt = addr_of(uid)
+    if not rcpt:
+        return None
+    h = hashlib.sha256(uid.encode()).hexdigest()[:8]
+    return f"{keyid}_{rcpt}_{h}.eml"
+
+
+def build_mail(cfg, fpr, uid, rcpt_name, rcpt):
+    key = gpg("--armor", "--export", "--export-filter", f"keep-uid=uid = {uid}",
+              fpr).stdout
+    if not key:
+        die(f"export of '{uid}' from {fpr} is empty")
+
+    inner = MIMEMultipart("mixed")
+    inner.attach(MIMEText(MAIL_BODY.format(uid=uid, fpr=fpr, name=cfg.name),
+                          "plain", "utf-8"))
+    att = MIMEApplication(key, "pgp-keys", email.encoders.encode_7or8bit)
+    att.add_header("Content-Disposition", "attachment",
+                   filename=f"0x{fpr[-16:]}.signed-uid.asc")
+    inner.attach(att)
+
+    enc = gpg("--armor", "--encrypt", "--trust-model", "always",
+              "--recipient", fpr, input=inner.as_bytes()).stdout
+
+    msg = MIMEMultipart("encrypted", protocol="application/pgp-encrypted")
+    ver = MIMEApplication(b"Version: 1\n", "pgp-encrypted",
+                          email.encoders.encode_7or8bit)
+    ver["Content-Description"] = "PGP/MIME version identification"
+    body = MIMEApplication(enc, "octet-stream", email.encoders.encode_7or8bit)
+    body["Content-Description"] = "OpenPGP encrypted message"
+    body.add_header("Content-Disposition", "inline", filename="encrypted.asc")
+    msg.attach(ver)
+    msg.attach(body)
+    msg["From"] = email.utils.formataddr((cfg.name, cfg.email))
+    msg["To"] = email.utils.formataddr((rcpt_name, rcpt))
+    msg["Subject"] = f"Your signed OpenPGP key 0x{fpr[-16:]}"
+    msg["Date"] = email.utils.formatdate(localtime=True)
+    msg["Message-ID"] = email.utils.make_msgid(
+        domain=cfg.email.rsplit("@", 1)[1])
+    return msg.as_bytes()
+
+
+def cmd_prepare(args, cfg):
+    outbox, sent = cfg.maildir / "outbox", cfg.maildir / "sent"
+    outbox.mkdir(parents=True, exist_ok=True)
+    sent.mkdir(parents=True, exist_ok=True)
+    for e in verified(read_list(args.list)):
+        fpr = local_fpr(e)
+        info = fpr and key_info(fpr, cfg.keyid)
+        if not info:
+            print(f"MISSING  {e}  (run fetch)")
+            continue
+        if "E" not in info["caps"]:
+            print(f"SKIP     {e}  (no usable encryption key)")
+            continue
+        for u in info["uids"]:
+            if not (usable(u) and u["signed"]):
+                continue
+            name, rcpt = addr_of(u["uid"])
+            fname = mail_name(e.keyid, u["uid"])
+            if not fname:
+                continue
+            if (outbox / fname).exists() or (sent / fname).exists():
+                print(f"exists   {e.keyid}  {rcpt}")
+                continue
+            (outbox / fname).write_bytes(
+                build_mail(cfg, fpr, u["uid"], name, rcpt))
+            print(f"prepare  {e.keyid}  {rcpt}")
+
+
+def cmd_send(args, cfg):
+    outbox, sent = cfg.maildir / "outbox", cfg.maildir / "sent"
+    sent.mkdir(parents=True, exist_ok=True)
+    mails = sorted(outbox.glob("*.eml"))
+    if not mails:
+        print("outbox is empty")
+        return
+    failed = 0
+    for m in mails:
+        data = m.read_bytes()
+        to = email.message_from_bytes(data)["To"]
+        rcpt = email.utils.parseaddr(to)[1]
+        if args.dry_run:
+            print(f"would send  {rcpt}  ({m.name})")
+            continue
+        r = subprocess.run([*cfg.sendmail, rcpt], input=data,
+                           capture_output=True)
+        if r.returncode:
+            failed += 1
+            print(f"FAILED   {rcpt}: {r.stderr.decode(errors='replace').strip()}")
+            continue
+        m.rename(sent / m.name)
+        print(f"sent     {rcpt}")
+    if failed:
+        die(f"{failed} mail(s) failed, left in {outbox}")
+
+
+def cmd_clean(args, cfg):
+    """Delete keys fetched by keysign once there is nothing left to send."""
+    outbox, sent = cfg.maildir / "outbox", cfg.maildir / "sent"
+    imported = read_imported(cfg)
+    for e in read_list(args.list):
+        fpr = local_fpr(e)
+        if not fpr or fpr == cfg.fpr:
+            continue
+        if fpr not in imported and not args.all:
+            print(f"keep     {e}  (was in the keyring before fetch)")
+            continue
+        if e.status == "x" and e.complete:
+            if any(outbox.glob(f"{e.keyid}_*.eml")):
+                print(f"keep     {e}  (mails still in outbox)")
+                continue
+            if not any(sent.glob(f"{e.keyid}_*.eml")):
+                print(f"keep     {e}  (nothing sent yet)")
+                continue
+        if args.dry_run:
+            print(f"would    {e}")
+            continue
+        gpg("--yes", "--delete-keys", fpr)
+        imported.discard(fpr)
+        write_imported(cfg, imported)
+        print(f"delete   {e}")
+
+
+def cmd_status(args, cfg):
+    outbox, sent = cfg.maildir / "outbox", cfg.maildir / "sent"
+    print(f"{'':2} {'keyid':16}  {'keyring':8} {'signed':7} {'outbox':7} "
+          f"{'sent':5} name")
+    for e in read_list(args.list):
+        fpr = local_fpr(e)
+        info = fpr and key_info(fpr, cfg.keyid)
+        n_out = len(list(outbox.glob(f"{e.keyid}_*.eml")))
+        n_sent = len(list(sent.glob(f"{e.keyid}_*.eml")))
+        if info:
+            uids = [u for u in info["uids"] if usable(u)]
+            signed = f"{sum(u['signed'] for u in uids)}/{len(uids)}"
+            where = {"e": "expired", "r": "revoked"}.get(info["validity"],
+                                                         "yes")
+        else:
+            uids, signed, where = [], "-", "no"
+        print(f"{e.status:2} {e.keyid:16}  {where:8} {signed:7} "
+              f"{n_out or '-':<7} {n_sent or '-':<5} {e.uid}")
+        if not args.verbose:
+            continue
+        for u in uids:
+            fname = mail_name(e.keyid, u["uid"])
+            mail = ("sent" if fname and (sent / fname).exists() else
+                    "outbox" if fname and (outbox / fname).exists() else "")
+            mark = "signed" if u["signed"] else ""
+            print(f"{'':21}{mark:8} {mail:7} {u['uid']}")
+
+
+def cmd_all(args, cfg):
+    cmd_fetch(args, cfg)
+    print()
+    cmd_sign(args, cfg)
+    if not args.dry_run:
+        print()
+        cmd_prepare(args, cfg)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-c", "--config", default="keysign.toml",
+                    help="config file (default: %(default)s)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("parse", help="extract keys from a participants list")
+    p.add_argument("input")
+    p.add_argument("-o", "--output", required=True)
+    p.set_defaults(func=cmd_parse, need_cfg=False)
+
+    p = sub.add_parser("add", help="add keys by email, fingerprint or key ID")
+    p.add_argument("list", help="key list to append to (created if missing)")
+    p.add_argument("query", nargs="+",
+                   help="email address, fingerprint or key ID")
+    p.add_argument("-x", "--verified", action="store_true",
+                   help="mark the keys as verified (only if you typed the "
+                        "full fingerprint from the slip)")
+    p.set_defaults(func=cmd_add)
+
+    p = sub.add_parser("fetch", help="make sure all keys are in the keyring")
+    p.add_argument("list")
+    p.add_argument("--refresh", action="store_true",
+                   help="import from the sources even if the key is present")
+    p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("sign", help="certify all UIDs of the verified keys")
+    p.add_argument("list")
+    p.add_argument("-n", "--dry-run", action="store_true")
+    p.set_defaults(func=cmd_sign)
+
+    p = sub.add_parser("prepare", help="write one encrypted mail per UID")
+    p.add_argument("list")
+    p.set_defaults(func=cmd_prepare)
+
+    p = sub.add_parser("send", help="send everything in the outbox")
+    p.add_argument("-n", "--dry-run", action="store_true")
+    p.set_defaults(func=cmd_send)
+
+    p = sub.add_parser("clean", help="delete the fetched keys again")
+    p.add_argument("list")
+    p.add_argument("--all", action="store_true",
+                   help="also delete keys that were in the keyring before")
+    p.add_argument("-n", "--dry-run", action="store_true")
+    p.set_defaults(func=cmd_clean)
+
+    p = sub.add_parser("status", help="show what has been signed and sent")
+    p.add_argument("list")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="show every UID")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("all", help="fetch, sign and prepare")
+    p.add_argument("list")
+    p.add_argument("--refresh", action="store_true")
+    p.add_argument("-n", "--dry-run", action="store_true")
+    p.set_defaults(func=cmd_all)
+
+    args = ap.parse_args()
+    cfg = Config(args.config) if getattr(args, "need_cfg", True) else None
+    args.func(args, cfg)
+
+
+if __name__ == "__main__":
+    main()

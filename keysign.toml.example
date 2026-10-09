@@ -1,0 +1,14 @@
+# keysign.py settings; copy to keysign.toml and adjust.
+
+name  = "Alice Example"
+email = "alice@example.org"
+keyid = "0123456789ABCDEF0123456789ABCDEF01234567"   # your full fingerprint
+
+# Command that sends one mail: the message is fed on stdin and the
+# recipient address is appended as the last argument.
+sendmail = ["msmtp", "-a", "default", "-f", "alice@example.org", "--"]
+# sendmail = ["/usr/sbin/sendmail", "-f", "alice@example.org", "--"]
+
+pgpkeys    = "pgpkeys/keys"      # clone of the kernel.org pgpkeys repo (optional)
+keyservers = ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"]
+maildir    = "mail"              # mail/outbox, mail/sent, mail/imported

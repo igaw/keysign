@@ -1,0 +1,7 @@
+# personal settings and data
+/keysign.toml
+/mail/
+/pgpkeys/
+*.keys
+
+__pycache__/
