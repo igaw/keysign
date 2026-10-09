@@ -145,16 +145,27 @@ x  0123456789ABCDEF  no       -       -       -     Carol Example <carol@example
 The signed count comes from your keyring, so a key deleted by `clean` shows
 `no` / `-`; the `sent` column still shows its mails.
 
-## Tests
+## Development
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v   # tests
+ruff check .                               # lint
+ruff format .                              # format
+mypy                                       # type check
 ```
 
-They also run on GitHub Actions (`.github/workflows/tests.yml`) for every
-push and pull request, with Python 3.11 to 3.13. The tests run offline in throwaway GnuPG homes with generated keys, a fake
+ruff and mypy are configured in `pyproject.toml`; install them with
+`pip install ruff mypy`. CI runs the same checks.
+
+### Tests
+
+The tests run offline in throwaway GnuPG homes with generated keys, a fake
 pgpkeys directory, a stubbed network and a fake sendmail. Your keyring is
 not touched.
+
+GitHub Actions (`.github/workflows/tests.yml`) runs the tests with Python
+3.11 to 3.13 and a lint job with ruff and mypy on every push and pull
+request.
 
 ## Files
 
@@ -163,6 +174,7 @@ not touched.
 | `keysign`                    | the tool                                      |
 | `keysign.toml.example`       | example settings, copy to `keysign.toml`      |
 | `tests/test_keysign.py`      | test suite                                    |
+| `pyproject.toml`             | project metadata, ruff and mypy settings      |
 | `*.keys`                     | key lists (yours, not tracked by git)         |
 | `mail/outbox/`, `mail/sent/` | prepared and sent mails                       |
 | `mail/imported`              | keys imported by `fetch`, used by `clean`     |

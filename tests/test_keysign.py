@@ -10,6 +10,8 @@ directory, a stubbed HTTP layer and a fake sendmail.
 
 import contextlib
 import email
+import email.message
+import email.utils
 import importlib.machinery
 import importlib.util
 import io
@@ -22,7 +24,6 @@ import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
-
 
 
 def load_keysign():
@@ -68,8 +69,12 @@ _______________________________________________________________________________
 
 
 def gpg_in(home, *args, input=None):
-    return subprocess.run(["gpg", "--batch", "--homedir", str(home), *args],
-                          input=input, capture_output=True, check=True).stdout
+    return subprocess.run(
+        ["gpg", "--batch", "--homedir", str(home), *args],
+        input=input,
+        capture_output=True,
+        check=True,
+    ).stdout
 
 
 def new_home(parent, name):
@@ -79,43 +84,74 @@ def new_home(parent, name):
 
 
 def gen_key(home, uid, *more_uids):
-    gpg_in(home, "--passphrase", "", "--quick-gen-key", uid, "default",
-           "default", "never")
-    fpr = [line.split(":")[9] for line in gpg_in(
-        home, "--with-colons", "--list-keys", uid).decode().splitlines()
-        if line.startswith("fpr:")][0]
+    gpg_in(
+        home,
+        "--passphrase",
+        "",
+        "--quick-gen-key",
+        uid,
+        "default",
+        "default",
+        "never",
+    )
+    listing = gpg_in(home, "--with-colons", "--list-keys", uid).decode()
+    fpr = next(
+        line.split(":")[9]
+        for line in listing.splitlines()
+        if line.startswith("fpr:")
+    )
     for u in more_uids:
         gpg_in(home, "--passphrase", "", "--quick-add-uid", fpr, u)
     return fpr
 
 
 def grouped(fpr):
-    return " ".join(fpr[i:i + 4] for i in range(0, 40, 4))
+    return " ".join(fpr[i : i + 4] for i in range(0, 40, 4))
 
 
 def kill_agent(home):
-    subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"],
-                   capture_output=True)
+    subprocess.run(
+        ["gpgconf", "--homedir", str(home), "--kill", "all"],
+        capture_output=True,
+    )
 
 
 class KeysignTestCase(unittest.TestCase):
     """Shared fixture: participant keys in SRC, a signer key, a fake net."""
 
+    tmp: Path
+    src: Path
+    alice: str
+    bob: str
+    carol: str
+    mallory: str
+    signer: str
+    signer_secret: bytes
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="keysign-test-"))
         cls.src = new_home(cls.tmp, "src")
-        cls.alice = gen_key(cls.src, "Alice Example <alice@example.org>",
-                            "Alice Example <alice@other.example>")
+        cls.alice = gen_key(
+            cls.src,
+            "Alice Example <alice@example.org>",
+            "Alice Example <alice@other.example>",
+        )
         cls.bob = gen_key(cls.src, "Bob Example <bob@example.org>")
         cls.carol = gen_key(cls.src, "Carol <carol@example.org>")
         cls.mallory = gen_key(cls.src, "Mallory <alice@example.org>")
 
         signer_home = new_home(cls.tmp, "signer")
         cls.signer = gen_key(signer_home, "Test Signer <signer@example.net>")
-        cls.signer_secret = gpg_in(signer_home, "--pinentry-mode", "loopback",
-                                   "--passphrase", "",
-                                   "--export-secret-keys", cls.signer)
+        cls.signer_secret = gpg_in(
+            signer_home,
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--export-secret-keys",
+            cls.signer,
+        )
         kill_agent(signer_home)
 
     @classmethod
@@ -138,16 +174,19 @@ class KeysignTestCase(unittest.TestCase):
 
         self.sendlog = self.dir / "sendlog"
         self.sendmail = self.dir / "fakesend"
-        self.sendmail.write_text(textwrap.dedent(f"""\
+        self.sendmail.write_text(
+            textwrap.dedent(f"""\
             #!/bin/sh
             [ "$1" = fail@example.org ] && {{ echo refused >&2; exit 1; }}
             cat > /dev/null
             echo "$1" >> {self.sendlog}
-            """))
+            """)
+        )
         self.sendmail.chmod(0o755)
 
         self.config = self.dir / "keysign.toml"
-        self.config.write_text(textwrap.dedent(f"""\
+        self.config.write_text(
+            textwrap.dedent(f"""\
             name = "Test Signer"
             email = "signer@example.net"
             keyid = "{self.signer}"
@@ -155,7 +194,8 @@ class KeysignTestCase(unittest.TestCase):
             pgpkeys = "{self.pgpkeys}"
             keyservers = ["hkps://ks.test"]
             maildir = "{self.maildir}"
-            """))
+            """)
+        )
 
         # Stub the network: map URL substrings to responses.
         self.net = {}
@@ -174,11 +214,14 @@ class KeysignTestCase(unittest.TestCase):
     def run_cli(self, *argv):
         """Run keysign with argv; return (stdout, exit status)."""
         out = io.StringIO()
-        status = 0
-        with mock.patch.object(sys, "argv",
-                               ["keysign", "-c", str(self.config), *argv]), \
-                contextlib.redirect_stdout(out), \
-                contextlib.redirect_stderr(io.StringIO()):
+        status: int | str | None = 0
+        with (
+            mock.patch.object(
+                sys, "argv", ["keysign", "-c", str(self.config), *argv]
+            ),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
             try:
                 keysign.main()
             except SystemExit as e:
@@ -201,8 +244,11 @@ class KeysignTestCase(unittest.TestCase):
 
     def local_fprs(self):
         out = gpg_in(self.home, "--with-colons", "--list-keys").decode()
-        return {line.split(":")[9] for line in out.splitlines()
-                if line.startswith("fpr:")}
+        return {
+            line.split(":")[9]
+            for line in out.splitlines()
+            if line.startswith("fpr:")
+        }
 
     def signed_uids(self, fpr):
         info = keysign.key_info(fpr, self.signer[-16:])
@@ -213,12 +259,15 @@ class TestHelpers(unittest.TestCase):
     def test_zbase32_wkd_vector(self):
         # Example from draft-koch-openpgp-webkey-service.
         import hashlib
+
         h = keysign.zbase32(hashlib.sha1(b"joe.doe").digest())
         self.assertEqual(h, "iy9q119eutrkn8s1mk4r39qejnbu3n5q")
 
     def test_addr_of(self):
-        self.assertEqual(keysign.addr_of("Uwe <uwe@kleine-könig.de>"),
-                         ("Uwe", "uwe@xn--kleine-knig-yfb.de"))
+        self.assertEqual(
+            keysign.addr_of("Uwe <uwe@kleine-könig.de>"),
+            ("Uwe", "uwe@xn--kleine-knig-yfb.de"),
+        )
         self.assertEqual(keysign.addr_of("[attribute]"), (None, None))
 
     def test_unescape(self):
@@ -237,11 +286,14 @@ class TestHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "l"
             fpr = "A46D32705865AA3DDEDC2904B7D2DD275D7EC087"
-            p.write_text(f"# comment\n\nx  {fpr[-16:]}  {fpr}  Brian <b@x>"
-                         f"  # trailing\n# x {fpr[-16:]} {fpr} sent\n")
+            p.write_text(
+                f"# comment\n\nx  {fpr[-16:]}  {fpr}  Brian <b@x>"
+                f"  # trailing\n# x {fpr[-16:]} {fpr} sent\n"
+            )
             [e] = keysign.read_list(p)
-            self.assertEqual((e.status, e.fpr, e.uid),
-                             ("x", fpr, "Brian <b@x>"))
+            self.assertEqual(
+                (e.status, e.fpr, e.uid), ("x", fpr, "Brian <b@x>")
+            )
 
             p.write_text(f"x  0000000000000000  {fpr}  bad keyid\n")
             with self.assertRaises(SystemExit):
@@ -255,9 +307,11 @@ class TestParse(KeysignTestCase):
     def test_parse(self):
         bob_masked = grouped(self.bob)
         bob_masked = bob_masked[:23] + "_  _" + bob_masked[26:]
-        text = PARTICIPANTS.format(alice_grouped=grouped(self.alice),
-                                   bob_masked=bob_masked,
-                                   carol_grouped=grouped(self.carol))
+        text = PARTICIPANTS.format(
+            alice_grouped=grouped(self.alice),
+            bob_masked=bob_masked,
+            carol_grouped=grouped(self.carol),
+        )
         src = self.dir / "list.txt"
         src.write_text(text)
         out = self.dir / "out.keys"
@@ -282,8 +336,9 @@ class TestFetch(KeysignTestCase):
         out, _ = self.run_cli("fetch", str(lst))
         self.assertIn("(kernel.org)", out)
         self.assertIn(self.alice, self.local_fprs())
-        self.assertIn(self.alice, keysign.read_imported(
-            keysign.Config(self.config)))
+        self.assertIn(
+            self.alice, keysign.read_imported(keysign.Config(self.config))
+        )
 
         out, _ = self.run_cli("fetch", str(lst))
         self.assertIn("have", out)
@@ -298,15 +353,17 @@ class TestFetch(KeysignTestCase):
 
     def test_from_wkd(self):
         self.net[".well-known/openpgpkey"] = self.export(self.carol)
-        lst = self.write_list(self.entry(self.carol,
-                                         "Carol <carol@example.org>"))
+        lst = self.write_list(
+            self.entry(self.carol, "Carol <carol@example.org>")
+        )
         out, _ = self.run_cli("fetch", str(lst))
         self.assertIn("(wkd)", out)
 
     def test_wrong_key_is_not_imported(self):
         # The source returns a different key than the list asks for.
         (self.pgpkeys / f"{self.alice[-16:]}.asc").write_bytes(
-            self.export(self.bob))
+            self.export(self.bob)
+        )
         lst = self.write_list(self.entry(self.alice, "Alice"))
         out, _ = self.run_cli("fetch", str(lst))
         self.assertIn("MISMATCH", out)
@@ -321,7 +378,8 @@ class SignedFixture(KeysignTestCase):
         self.publish_kernel_org(self.bob)
         self.list = self.write_list(
             self.entry(self.alice, "Alice Example <alice@example.org>"),
-            self.entry(self.bob, "Bob Example <bob@example.org>", "-"))
+            self.entry(self.bob, "Bob Example <bob@example.org>", "-"),
+        )
         self.run_cli("fetch", str(self.list))
 
 
@@ -334,9 +392,13 @@ class TestSign(SignedFixture):
     def test_sign_verified_only(self):
         out, _ = self.run_cli("sign", str(self.list))
         self.assertIn("sign ", out)
-        self.assertEqual(self.signed_uids(self.alice),
-                         ["Alice Example <alice@example.org>",
-                          "Alice Example <alice@other.example>"])
+        self.assertEqual(
+            self.signed_uids(self.alice),
+            [
+                "Alice Example <alice@example.org>",
+                "Alice Example <alice@other.example>",
+            ],
+        )
         self.assertEqual(self.signed_uids(self.bob), [])
 
         out, _ = self.run_cli("sign", str(self.list))
@@ -367,15 +429,30 @@ class TestPrepareSend(SignedFixture):
             rcpt = email.utils.parseaddr(msg["To"])[1]
 
             # Alice can decrypt it, and it holds exactly her signed UID.
-            enc = msg.get_payload()[1].get_payload(decode=True)
+            parts = msg.get_payload()
+            assert isinstance(parts, list)
+            body = parts[1]
+            assert isinstance(body, email.message.Message)
+            enc = body.get_payload(decode=True)
             inner = email.message_from_bytes(
-                gpg_in(self.src, "--decrypt", input=enc))
-            key = next(p for p in inner.walk()
-                       if p.get_content_type() == "application/pgp-keys")
-            listing = gpg_in(self.src, "--with-colons", "--show-keys",
-                             input=key.get_payload(decode=True)).decode()
-            uids = [line.split(":")[9] for line in listing.splitlines()
-                    if line.startswith("uid:")]
+                gpg_in(self.src, "--decrypt", input=enc)
+            )
+            key = next(
+                p
+                for p in inner.walk()
+                if p.get_content_type() == "application/pgp-keys"
+            )
+            listing = gpg_in(
+                self.src,
+                "--with-colons",
+                "--show-keys",
+                input=key.get_payload(decode=True),
+            ).decode()
+            uids = [
+                line.split(":")[9]
+                for line in listing.splitlines()
+                if line.startswith("uid:")
+            ]
             self.assertEqual(len(uids), 1)
             self.assertIn(f"<{rcpt}>", uids[0])
 
@@ -391,8 +468,10 @@ class TestPrepareSend(SignedFixture):
 
         out, status = self.run_cli("send")
         self.assertEqual(status, 0)
-        self.assertEqual(sorted(self.sendlog.read_text().split()),
-                         ["alice@example.org", "alice@other.example"])
+        self.assertEqual(
+            sorted(self.sendlog.read_text().split()),
+            ["alice@example.org", "alice@other.example"],
+        )
         self.assertEqual(list(self.outbox.glob("*.eml")), [])
         self.assertEqual(len(list(self.sent.glob("*.eml"))), 2)
 
@@ -403,7 +482,8 @@ class TestPrepareSend(SignedFixture):
     def test_failed_send_stays_in_outbox(self):
         self.outbox.mkdir(parents=True)
         (self.outbox / "X_fail.eml").write_text(
-            "To: fail@example.org\nSubject: x\n\nbody\n")
+            "To: fail@example.org\nSubject: x\n\nbody\n"
+        )
         out, status = self.run_cli("send")
         self.assertNotEqual(status, 0)
         self.assertIn("FAILED", out)
@@ -417,7 +497,8 @@ class TestCleanStatus(SignedFixture):
         lst = self.write_list(
             self.entry(self.alice, "Alice"),
             self.entry(self.bob, "Bob", "-"),
-            self.entry(self.carol, "Carol", "-"))
+            self.entry(self.carol, "Carol", "-"),
+        )
         self.run_cli("sign", str(lst))
 
         # Alice has nothing sent yet: kept. Bob is fetch-only: deleted.
@@ -448,10 +529,12 @@ class TestCleanStatus(SignedFixture):
         self.run_cli("sign", str(self.list))
         self.run_cli("prepare", str(self.list))
         out, _ = self.run_cli("status", str(self.list))
-        alice = next(line for line in out.splitlines()
-                     if self.alice[-16:] in line)
-        self.assertEqual(alice.split()[:5],
-                         ["x", self.alice[-16:], "yes", "2/2", "2"])
+        alice = next(
+            line for line in out.splitlines() if self.alice[-16:] in line
+        )
+        self.assertEqual(
+            alice.split()[:5], ["x", self.alice[-16:], "yes", "2/2", "2"]
+        )
 
         self.run_cli("send")
         out, _ = self.run_cli("status", "-v", str(self.list))
@@ -465,8 +548,7 @@ class TestAdd(KeysignTestCase):
 
     def test_add_by_email_is_unverified(self):
         self.net["search=alice%40example.org"] = self.export(self.alice)
-        out, _ = self.run_cli("add", "-x", str(self.list),
-                              "alice@example.org")
+        out, _ = self.run_cli("add", "-x", str(self.list), "alice@example.org")
         self.assertIn("added as '-'", out)
         self.assertIn(grouped(self.alice), out)
         [e] = keysign.read_list(self.list)
@@ -474,16 +556,19 @@ class TestAdd(KeysignTestCase):
         self.assertEqual(e.uid, "Alice Example <alice@example.org>")
 
     def test_add_by_email_warns_on_several_keys(self):
-        self.net["search=alice%40example.org"] = (
-            self.export(self.alice) + self.export(self.mallory))
+        self.net["search=alice%40example.org"] = self.export(
+            self.alice
+        ) + self.export(self.mallory)
         out, _ = self.run_cli("add", str(self.list), "alice@example.org")
         self.assertIn("WARNING  2 keys", out)
-        self.assertEqual({e.fpr for e in keysign.read_list(self.list)},
-                         {self.alice, self.mallory})
+        self.assertEqual(
+            {e.fpr for e in keysign.read_list(self.list)},
+            {self.alice, self.mallory},
+        )
 
     def test_add_by_full_fingerprint_verified(self):
         self.publish_kernel_org(self.carol)
-        out, _ = self.run_cli("add", "-x", str(self.list), grouped(self.carol))
+        self.run_cli("add", "-x", str(self.list), grouped(self.carol))
         [e] = keysign.read_list(self.list)
         self.assertEqual((e.status, e.fpr), ("x", self.carol))
 
@@ -498,8 +583,11 @@ class TestAdd(KeysignTestCase):
 
     def test_add_wrong_fingerprint(self):
         self.publish_kernel_org(self.bob)
-        wrong = self.bob[:19] + ("0" if self.bob[19] != "0" else "1") \
+        wrong = (
+            self.bob[:19]
+            + ("0" if self.bob[19] != "0" else "1")
             + self.bob[20:]
+        )
         out, _ = self.run_cli("add", str(self.list), wrong)
         self.assertIn("NOTFOUND", out)
         self.assertFalse(self.list.exists())
