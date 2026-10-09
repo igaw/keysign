@@ -1,11 +1,14 @@
 PYTHON ?= python3
 RUFF   ?= ruff
 MYPY   ?= mypy
+PIPX   ?= pipx
 RUFFFLAGS ?=
-PREFIX ?= $(HOME)/.local
-BINDIR ?= $(PREFIX)/bin
 
-.PHONY: help check test lint format format-check typecheck install uninstall clean
+# Run the tests against the source tree, no install needed.
+export PYTHONPATH := $(CURDIR)/src$(if $(PYTHONPATH),:$(PYTHONPATH))
+
+.PHONY: help check test lint format format-check typecheck dev build \
+	install uninstall clean
 
 help:
 	@echo "make check         run lint, format-check, typecheck and test"
@@ -14,9 +17,11 @@ help:
 	@echo "make format        format the code with ruff"
 	@echo "make format-check  check the formatting"
 	@echo "make typecheck     run mypy"
-	@echo "make install       install keysign to $(BINDIR)"
-	@echo "make uninstall     remove keysign from $(BINDIR)"
-	@echo "make clean         remove caches"
+	@echo "make dev           editable install with ruff and mypy"
+	@echo "make build         build a wheel into dist/"
+	@echo "make install       install the keysign command with pipx"
+	@echo "make uninstall     remove it again"
+	@echo "make clean         remove build output and caches"
 
 check: lint format-check typecheck test
 
@@ -36,11 +41,18 @@ format-check:
 typecheck:
 	$(MYPY)
 
+dev:
+	$(PYTHON) -m pip install -e '.[dev]'
+
+build:
+	$(PYTHON) -m pip wheel --no-deps -w dist .
+
 install:
-	install -D -m 755 keysign $(DESTDIR)$(BINDIR)/keysign
+	$(PIPX) install --force .
 
 uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/keysign
+	$(PIPX) uninstall keysign
 
 clean:
-	rm -rf __pycache__ tests/__pycache__ .mypy_cache .ruff_cache
+	rm -rf build dist src/*.egg-info .mypy_cache .ruff_cache
+	rm -rf src/keysign/__pycache__ tests/__pycache__

@@ -2,6 +2,10 @@
 
 Run from the repository root with
 
+    make test
+
+or, with keysign installed (pip install -e .),
+
     python3 -m unittest discover -s tests -v
 
 Everything runs offline: throwaway GnuPG homes, a fake kernel.org pgpkeys
@@ -12,8 +16,6 @@ import contextlib
 import email
 import email.message
 import email.utils
-import importlib.machinery
-import importlib.util
 import io
 import os
 import shutil
@@ -25,19 +27,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-
-def load_keysign():
-    """Import the keysign script, which has no .py extension."""
-    path = Path(__file__).resolve().parent.parent / "keysign"
-    loader = importlib.machinery.SourceFileLoader("keysign", str(path))
-    spec = importlib.util.spec_from_loader("keysign", loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-keysign = load_keysign()
+from keysign import cli as keysign
 
 PARTICIPANTS = """\
      K E Y S I G N I N G   T E S T
@@ -301,6 +291,54 @@ class TestHelpers(unittest.TestCase):
             p.write_text(f"y  {fpr[-16:]}  {fpr}  bad status\n")
             with self.assertRaises(SystemExit):
                 keysign.read_list(p)
+
+
+class TestConfigLookup(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="keysign-test-"))
+        self.addCleanup(shutil.rmtree, self.dir)
+        cwd = Path.cwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, cwd)
+
+    def test_xdg_config_home(self):
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/xdg"}):
+            self.assertEqual(
+                keysign.default_config(),
+                Path("/xdg/keysign/keysign.toml"),
+            )
+
+    def test_home_config(self):
+        env = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                keysign.default_config(),
+                Path.home() / ".config/keysign/keysign.toml",
+            )
+
+    def test_local_config_wins(self):
+        Path("keysign.toml").touch()
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/xdg"}):
+            self.assertEqual(keysign.default_config(), Path("keysign.toml"))
+
+    def test_missing_config(self):
+        with (
+            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.dir)}),
+            mock.patch.object(sys, "argv", ["keysign", "send"]),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            keysign.main()
+        self.assertIn("config not found", str(cm.exception.code))
+
+    def test_version(self):
+        out = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["keysign", "--version"]),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            keysign.main()
+        self.assertRegex(out.getvalue(), r"^keysign \d+\.\d+")
 
 
 class TestParse(KeysignTestCase):

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """keysign - sign the keys from a keysigning party and mail the signatures.
 
 Workflow:
@@ -23,7 +22,9 @@ status 'x' means fingerprint and ID were verified at the event; only those keys
 are signed. '-' entries are fetched only. A '_' in the fingerprint marks a
 nibble that was masked on the printed list.
 
-Settings are read from keysign.toml (see --config).
+Settings are read from the file given with --config, else from
+./keysign.toml, else from $XDG_CONFIG_HOME/keysign/keysign.toml
+(~/.config/keysign/keysign.toml).
 """
 
 import argparse
@@ -31,6 +32,7 @@ import email.encoders
 import email.utils
 import functools
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -42,6 +44,8 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+
+from keysign import __version__
 
 DEFAULT_KEYSERVERS = ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"]
 
@@ -74,6 +78,15 @@ def die(msg):
 
 
 # ---------------------------------------------------------------- config
+
+
+def default_config():
+    """./keysign.toml, else the one in the XDG config directory."""
+    local = Path("keysign.toml")
+    if local.exists():
+        return local
+    xdg = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(xdg) / "keysign" / "keysign.toml"
 
 
 class Config:
@@ -722,14 +735,18 @@ def cmd_all(args, cfg):
 
 def main():
     ap = argparse.ArgumentParser(
+        prog="keysign",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
         "-c",
         "--config",
-        default="keysign.toml",
-        help="config file (default: %(default)s)",
+        help="config file (default: ./keysign.toml, else "
+        "~/.config/keysign/keysign.toml)",
+    )
+    ap.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -798,9 +815,8 @@ def main():
     p.set_defaults(func=cmd_all)
 
     args = ap.parse_args()
-    cfg = Config(args.config) if getattr(args, "need_cfg", True) else None
+    if getattr(args, "need_cfg", True):
+        cfg = Config(args.config or default_config())
+    else:
+        cfg = None
     args.func(args, cfg)
-
-
-if __name__ == "__main__":
-    main()

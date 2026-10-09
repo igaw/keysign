@@ -34,5 +34,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install GnuPG
         run: sudo apt-get update && sudo apt-get install -y gnupg
-      - name: Run tests
-        run: make test PYTHON=python
+      - name: Install keysign
+        run: pip install .
+      - name: Smoke test the installed command
+        run: keysign --version
+      - name: Run tests against the installed package
+        run: python -m unittest discover -s tests -v

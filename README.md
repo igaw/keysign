@@ -9,11 +9,21 @@ compatible program). Optionally a clone of the
 [kernel.org pgpkeys](https://git.kernel.org/pub/scm/docs/kernel/pgpkeys.git)
 repo in `pgpkeys/`. No Python packages beyond the standard library.
 
+## Install
+
+```sh
+pipx install git+https://github.com/<user>/keysign
+```
+
+or from a checkout with `make install` (uses pipx) or `pip install .`. Without
+installing, run it from the checkout with `PYTHONPATH=src python3 -m keysign`.
+
 ## Setup
 
 ```sh
-cp keysign.toml.example keysign.toml
-$EDITOR keysign.toml
+mkdir -p ~/.config/keysign
+cp keysign.toml.example ~/.config/keysign/keysign.toml
+$EDITOR ~/.config/keysign/keysign.toml
 ```
 
 ```toml
@@ -29,7 +39,10 @@ keyservers = ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"]
 maildir    = "mail"
 ```
 
-Any other config file can be used with `-c FILE`.
+keysign reads the file given with `-c FILE`, else `./keysign.toml`, else
+`$XDG_CONFIG_HOME/keysign/keysign.toml` (`~/.config/keysign/keysign.toml`).
+A `keysign.toml` in a party directory overrides the global one. Relative paths
+in the config (`pgpkeys`, `maildir`) are relative to the current directory.
 
 keysign uses the keyring in `$GNUPGHOME` (default `~/.gnupg`), so point it at
 the keyring that holds your secret key.
@@ -37,25 +50,25 @@ the keyring that holds your secret key.
 ## Workflow
 
 ```sh
-./keysign parse   party.txt -o party.keys
-$EDITOR party.keys                # review
-./keysign fetch   party.keys
-./keysign sign    party.keys      # -n for a dry run
-./keysign prepare party.keys
-./keysign send                    # -n for a dry run
-./keysign clean   party.keys      # -n for a dry run
-./keysign status  party.keys      # -v for every UID
+keysign parse   party.txt -o party.keys
+$EDITOR party.keys              # review
+keysign fetch   party.keys
+keysign sign    party.keys      # -n for a dry run
+keysign prepare party.keys
+keysign send                    # -n for a dry run
+keysign clean   party.keys      # -n for a dry run
+keysign status  party.keys      # -v for every UID
 ```
 
 For keys from paper slips, start with `add` instead of `parse`:
 
 ```sh
-./keysign add slips.keys alice@example.org 'ABCD 1234 ... 9876' 0x1234567890ABCDEF
-$EDITOR slips.keys        # compare with the slips, mark '-' -> 'x'
-./keysign fetch slips.keys  # then continue as above
+keysign add slips.keys alice@example.org 'ABCD 1234 ... 9876' 0x1234567890ABCDEF
+$EDITOR slips.keys          # compare with the slips, mark '-' -> 'x'
+keysign fetch slips.keys    # then continue as above
 ```
 
-`./keysign all LIST` runs fetch, sign and prepare in one go. All steps can
+`keysign all LIST` runs fetch, sign and prepare in one go. All steps can
 be re-run safely: they skip what is already done.
 
 ### parse
@@ -148,15 +161,16 @@ The signed count comes from your keyring, so a key deleted by `clean` shows
 ## Development
 
 ```sh
+make dev         # editable install with ruff and mypy (use a venv)
 make check       # lint, format-check, typecheck and test
-make test        # unit tests only
+make test        # unit tests only, against src/ (no install needed)
 make format      # reformat the code
-make install     # copy keysign to ~/.local/bin (PREFIX=/usr/local, DESTDIR=...)
+make build       # build a wheel into dist/
 make help        # all targets
 ```
 
-ruff and mypy are configured in `pyproject.toml`; install them with
-`pip install ruff mypy`. CI runs the same make targets.
+ruff and mypy are configured in `pyproject.toml`. The lint job in CI runs the
+same make targets.
 
 ### Tests
 
@@ -164,19 +178,20 @@ The tests run offline in throwaway GnuPG homes with generated keys, a fake
 pgpkeys directory, a stubbed network and a fake sendmail. Your keyring is
 not touched.
 
-GitHub Actions (`.github/workflows/tests.yml`) runs the tests with Python
-3.11 to 3.13 and a lint job with ruff and mypy on every push and pull
-request.
+GitHub Actions (`.github/workflows/tests.yml`) installs the package and runs
+the tests against it with Python 3.11 to 3.13, plus a lint job with ruff and
+mypy, on every push and pull request.
 
 ## Files
 
 | Path                         | Purpose                                       |
 |------------------------------|-----------------------------------------------|
-| `keysign`                    | the tool                                      |
-| `keysign.toml.example`       | example settings, copy to `keysign.toml`      |
+| `src/keysign/cli.py`         | the tool                                      |
+| `src/keysign/__main__.py`    | `python -m keysign`                           |
+| `keysign.toml.example`       | example settings                              |
 | `tests/test_keysign.py`      | test suite                                    |
-| `pyproject.toml`             | project metadata, ruff and mypy settings      |
-| `Makefile`                   | test, lint, format and install targets        |
+| `pyproject.toml`             | packaging, entry point, ruff and mypy config  |
+| `Makefile`                   | dev, test, lint, format, build, install       |
 | `*.keys`                     | key lists (yours, not tracked by git)         |
 | `mail/outbox/`, `mail/sent/` | prepared and sent mails                       |
 | `mail/imported`              | keys imported by `fetch`, used by `clean`     |

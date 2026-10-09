@@ -1,4 +1,5 @@
-# keysign settings; copy to keysign.toml and adjust.
+# keysign settings; copy to ~/.config/keysign/keysign.toml (or ./keysign.toml)
+# and adjust.
 
 name  = "Alice Example"
 email = "alice@example.org"
